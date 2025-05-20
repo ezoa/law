@@ -1,0 +1,6 @@
+# %%capture
+docling
+weaviate-client
+rich
+torch
+
