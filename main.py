@@ -1,193 +1,98 @@
+import streamlit as st
+import os
+import torch
 import warnings
 warnings.filterwarnings("ignore")
 
-import logging
-# Suppress Weaviate client logs
-logging.getLogger("weaviate").setLevel(logging.ERROR)
-
-import torch
-OPENAI_API_KEY=""
-# Check if GPU or MPS is available
-if torch.cuda.is_available():
-    device = torch.device("cuda")
-    print(f"CUDA GPU is enabled: {torch.cuda.get_device_name(0)}")
-elif torch.backends.mps.is_available():
-    device = torch.device("mps")
-    print("MPS GPU is enabled.")
-else:
-    raise EnvironmentError(
-        "No GPU or MPS device found. Please check your environment and ensure GPU or MPS support is configured."
-)
-
-
-source_urls = [
-    "code.pdf"
-   
-]
-source_titles = [
-    "Ivorian Nationality Code ",
-
-]
+import weaviate
+from weaviate.auth import AuthApiKey
+from weaviate.classes.query import MetadataQuery
+import weaviate.classes.config as wc
 from docling.datamodel.document import ConversionResult
 from docling.document_converter import DocumentConverter
-
-# Instantiate the doc converter
-doc_converter = DocumentConverter()
-
-# Directly pass list of files or streams to `convert_all`
-conv_results_iter = doc_converter.convert_all(source_urls) # previously `convert`
-
-# Iterate over the generator to get a list of Docling documents
-docs = [result.document for result in conv_results_iter]
-
 from docling_core.transforms.chunker import HierarchicalChunker
 
-# Initialize lists for text, and titles
-texts, titles = [], []
+# --- 1. UI ---
 
-chunker = HierarchicalChunker()
+st.title("Attieke AI: 📖Droit Pour Tous⚖️")
+st.markdown("Chargement du **Code de la nationalité ivoirienne**")
+# Chargement du Code de la nationalité ivoirienne dans Weaviate + RAG avec Cohere
 
-# Process each document in the list
-for doc, title in zip(docs, source_titles):       # Pair each document with its title
-    chunks = list(chunker.chunk(doc))             # Perform hierarchical chunking and get text from chunks
-    for chunk in chunks:
-        texts.append(chunk.text)
-        titles.append(title)
+# --- 2. GPU ---
 
-# Concatenate title and text
-for i in range(len(texts)):
-    texts[i] = f"{titles[i]} {texts[i]}"
+if torch.cuda.is_available():
+    st.success(f"✅ GPU actif : {torch.cuda.get_device_name(0)}")
+else:
+    st.warning("⚠️ GPU non détecté. L'application continue sans GPU.")
 
-openai_api_key_var = "OPENAI_API_KEY"  # Replace with the name of your secret/env var
+# --- 3. Cohere API key ---
 
-# Fetch OpenAI API key
-try:
-    # If running in Colab, fetch API key from Secrets
-    import google.colab
-    from google.colab import userdata
-    openai_api_key = userdata.get(openai_api_key_var)
-    if not openai_api_key:
-        raise ValueError(f"Secret '{openai_api_key_var}' not found in Colab secrets.")
-except ImportError:
-    # If not running in Colab, fetch API key from environment variable
-    import os
-    openai_api_key = os.getenv(openai_api_key_var)
-    if not openai_api_key:
-        raise EnvironmentError(
-            f"Environment variable '{openai_api_key_var}' is not set. "
-            "Please define it before running this script."
-        )
-import weaviate
+cohere_api_key = "JYDiE7R98t6HIfTWnMo62807LJ1dw6uppBg5b8nY"
 
-# Connect to Weaviate embedded
-client = weaviate.connect_to_embedded(
-    headers={
-        "X-OpenAI-Api-Key": openai_api_key
-    }
+# --- 4. Connexion à Weaviate ---
+
+client = weaviate.connect_to_wcs(
+    cluster_url="https://jvbgyuplrnwfx3k2dmjidg.c0.us-west3.gcp.weaviate.cloud",
+    auth_credentials=AuthApiKey("SVJXQ0hNUnNyYTNMN2FWUV9ockdRRXltM0lGcmNQU0w3L0FhUXE4NDZGdW1qNCtzcVpkZ2lzaUdzcTdnPV92MjAw"),
+    headers={"X-Cohere-Api-Key": cohere_api_key}
 )
 
-import weaviate.classes.config as wc
-from weaviate.classes.config import Property, DataType
+# --- 5. Collection ---
 
-# Define the collection name
 collection_name = "docling"
-
-# Delete the collection if it already exists
-if (client.collections.exists(collection_name)):
+if client.collections.exists(collection_name):
     client.collections.delete(collection_name)
 
-# Create the collection
 collection = client.collections.create(
     name=collection_name,
-    vectorizer_config=wc.Configure.Vectorizer.text2vec_openai(
-        model="text-embedding-3-large",                           # Specify your embedding model here
-    ),
-
-    # Enable generative model from Cohere
-    generative_config=wc.Configure.Generative.openai(
-    model="gpt-4o"                                                # Specify your generative model for RAG here
-    ),
-
-    # Define properties of metadata
+    vectorizer_config=wc.Configure.Vectorizer.text2vec_cohere(model="embed-english-light-v3.0"),
+    generative_config=wc.Configure.Generative.cohere(model="command-r-plus"),
     properties=[
-        wc.Property(
-            name="text",
-            data_type=wc.DataType.TEXT
-        ),
-        wc.Property(
-            name="title",
-            data_type=wc.DataType.TEXT,
-            skip_vectorization=True
-        ),
+        wc.Property(name="text", data_type=wc.DataType.TEXT),
+        wc.Property(name="title", data_type=wc.DataType.TEXT, skip_vectorization=True),
     ]
 )
-# Initialize the data object
-data = []
 
-# Create a dictionary for each row by iterating through the corresponding lists
-for text, title in zip(texts, titles):
-    data_point = {
-        "text": text,
-        "title": title,
-    }
-    data.append(data_point)
+# --- 6. Chargement du PDF ---
+source_urls = ["code.pdf"]
+source_titles = ["Ivorian Nationality Code"]
 
-# Insert text chunks and metadata into vector DB collection
-response = collection.data.insert_many(
-    data
-)
+doc_converter = DocumentConverter()
+conv_results_iter = doc_converter.convert_all(source_urls)
+docs = [result.document for result in conv_results_iter]
 
-if (response.has_errors):
-    print(response.errors)
+chunker = HierarchicalChunker()
+texts, titles = [], []
+
+for doc, title in zip(docs, source_titles):
+    chunks = list(chunker.chunk(doc))
+    for chunk in chunks:
+        texts.append(f"{title} {chunk.text}")
+        titles.append(title)
+
+# --- 7. Insertion dans Weaviate ---
+data = [{"text": text, "title": title} for text, title in zip(texts, titles)]
+response = collection.data.insert_many(data)
+
+if response.has_errors:
+    st.error(f"❌ Erreurs lors de l'insertion : {response.errors}")
 else:
-    print("Insert complete.")
+    st.success("✅ Insertion des données réussie.")
 
-from weaviate.classes.query import MetadataQuery
+# --- 8. Recherche contextuelle ---
+st.header("🔍 Recherche contextuelle")
+user_query = st.text_input("Entrez une requête (ex : code de nationalité)", "nationalité par filiation")
 
-response = collection.query.near_text(
-    query="bert",
-    limit=2,
-    return_metadata=MetadataQuery(distance=True),
-    return_properties=["text", "title"]
-)
-
-for o in response.objects:
-    print(o.properties)
-    print(o.metadata.distance)
-from rich.console import Console
-from rich.panel import Panel
-
-# Create a prompt where context from the Weaviate collection will be injected
-prompt = "Quelles sont les loi du {text} "
-query = "code de nationalite"
-
-response = collection.generate.near_text(
-    query=query,
-    limit=3,
-    grouped_task=prompt,
-    return_properties=["text", "title"]
-)
-
-# Prettify the output using Rich
-console = Console()
-
-console.print(Panel(f"{prompt}".replace("{text}", query), title="Prompt", border_style="bold red"))
-console.print(Panel(response.generated, title="Generated Content", border_style="bold green"))
-
-
-# # Create a prompt where context from the Weaviate collection will be injected
-# prompt = "Explain how {text} works, using only the retrieved context."
-# query = "a generative adversarial net"
-
-# response = collection.generate.near_text(
-#     query=query,
-#     limit=3,
-#     grouped_task=prompt,
-#     return_properties=["text", "title"]
-# )
-
-# # Prettify the output using Rich
-# console = Console()
-
-# console.print(Panel(f"{prompt}".replace("{text}", query), title="Prompt", border_style="bold red"))
-# console.print(Panel(response.generated, title="Generated Content", border_style="bold green"))
+if user_query:
+    prompt = "Quelles sont les lois du {text} ?"
+    try:
+        response = collection.generate.near_text(
+            query=user_query,
+            limit=3,
+            grouped_task=prompt,
+            return_properties=["text", "title"]
+        )
+        st.markdown(f"🧠 **Prompt généré :** _{prompt.replace('{text}', user_query)}_")
+        st.success(response.generated)
+    except Exception as e:
+        st.error(f"Erreur : {e}")
